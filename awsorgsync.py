@@ -55,7 +55,7 @@ def get_org_accounts(profile):
     return accounts
 
 
-def populate_profiles(prefix):
+def populate_profiles(prefix, dry_run=False):
     base_profile = prefix
     root_profile = f"{prefix}-root"
 
@@ -80,29 +80,40 @@ def populate_profiles(prefix):
         if config.has_section(new_profile):
             continue
 
-        config.add_section(new_profile)
-        config.set(new_profile, "source_profile", base_profile)
-        config.set(
-            new_profile, "role_arn", f"arn:aws:iam::{account_id}:role/{role_name}"
-        )
-        config.set(new_profile, "region", region)
+        print(f"{'[DRY-RUN] ' if dry_run else ''}Would create profile: {prefix}-{name}")
+        print(f"  source_profile = {base_profile}")
+        print(f"  role_arn = arn:aws:iam::{account_id}:role/{role_name}")
+        print(f"  region = {region}")
 
-        print(f"Created profile: {prefix}-{name}")
+        if not dry_run:
+            config.add_section(new_profile)
+            config.set(new_profile, "source_profile", base_profile)
+            config.set(
+                new_profile,
+                "role_arn",
+                f"arn:aws:iam::{account_id}:role/{role_name}",
+            )
+            config.set(new_profile, "region", region)
 
-    with open(AWS_CONFIG_PATH, "w") as f:
-        config.write(f)
-
-    print("Done.")
+    if not dry_run:
+        with open(AWS_CONFIG_PATH, "w") as f:
+            config.write(f)
+        print("Done.")
+    else:
+        print("Dry run complete. No changes written.")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["populate"])
+    parser.add_argument("command", choices=["sync"])
     parser.add_argument("prefix")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Show changes without writing to config"
+    )
     args = parser.parse_args()
 
-    if args.command == "populate":
-        populate_profiles(args.prefix)
+    if args.command == "sync":
+        populate_profiles(args.prefix, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
