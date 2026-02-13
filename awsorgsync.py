@@ -10,6 +10,8 @@ import boto3
 
 AWS_CONFIG_PATH = os.path.expanduser("~/.aws/config")
 
+IGNORED_ACCOUNT_KEYWORDS = ["finops"]
+
 
 def normalize(name):
     name = name.lower()
@@ -71,16 +73,33 @@ def populate_profiles(prefix, dry_run=False):
     print(f"Using region: {region}")
 
     accounts = get_org_accounts(root_profile)
+    skipped_accounts = []
 
     for account in accounts:
-        name = normalize(account["Name"])
+        account_name_raw = account["Name"]
+        account_name_lower = account_name_raw.lower()
+
+        if any(keyword in account_name_lower for keyword in IGNORED_ACCOUNT_KEYWORDS):
+            skipped_accounts.append(account_name_raw)
+            continue
+
+        name = normalize(account_name_raw)
         account_id = account["Id"]
-        new_profile = f"profile {prefix}-{name}"
+
+        # Avoid double prefix
+        if name.startswith(f"{prefix}-"):
+            final_profile_name = name
+        else:
+            final_profile_name = f"{prefix}-{name}"
+
+        new_profile = f"profile {final_profile_name}"
 
         if config.has_section(new_profile):
             continue
 
-        print(f"{'[DRY-RUN] ' if dry_run else ''}Would create profile: {prefix}-{name}")
+        print(
+            f"{'[DRY-RUN] ' if dry_run else ''}Would create profile: {final_profile_name}"
+        )
         print(f"  source_profile = {base_profile}")
         print(f"  role_arn = arn:aws:iam::{account_id}:role/{role_name}")
         print(f"  region = {region}")
@@ -94,6 +113,11 @@ def populate_profiles(prefix, dry_run=False):
                 f"arn:aws:iam::{account_id}:role/{role_name}",
             )
             config.set(new_profile, "region", region)
+
+    if skipped_accounts:
+        print("\nSkipped accounts:")
+        for acc in skipped_accounts:
+            print(f"  - {acc}")
 
     if not dry_run:
         with open(AWS_CONFIG_PATH, "w") as f:
