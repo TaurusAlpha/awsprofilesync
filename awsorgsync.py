@@ -21,7 +21,7 @@ def normalize(name):
     return re.sub(r"[^a-z0-9-]", "-", name)
 
 
-def ensure_sso_login(profile):
+def ensure_sso_login(profile: str):
     subprocess.run(["aws", "sso", "login", "--profile", profile], check=True)
 
 
@@ -31,7 +31,7 @@ def load_config():
     return config
 
 
-def extract_role_name(config, root_profile):
+def extract_role_name(config, root_profile: str):
     section = f"profile {root_profile}"
     if not config.has_section(section):
         raise Exception(f"{root_profile} not found in AWS config")
@@ -40,12 +40,12 @@ def extract_role_name(config, root_profile):
     return role_arn.split("/")[-1]
 
 
-def extract_region(config, root_profile):
+def extract_region(config, root_profile: str):
     section = f"profile {root_profile}"
     return config.get(section, "region")
 
 
-def get_org_accounts(profile):
+def get_org_accounts(profile: str):
     session = boto3.Session(profile_name=profile)
     org = session.client("organizations")
 
@@ -60,7 +60,7 @@ def get_org_accounts(profile):
     return accounts
 
 
-def populate_profiles(prefix, dry_run=False):
+def populate_profiles(prefix: str, dry_run: bool = False):
     base_profile = prefix
     root_profile = f"{prefix}-root"
 
@@ -131,6 +131,17 @@ def populate_profiles(prefix, dry_run=False):
         logger.info("Dry run complete. No changes written.")
 
 
+def list_profiles(prefix: str):
+    config = load_config()
+    pattern = re.compile(f"^profile {prefix}[-a-z0-9]*$")
+
+    logger.info("Profiles with prefix '%s':", prefix)
+    for section in config.sections():
+        if pattern.match(section):
+            profile_name = section.replace("profile ", "")
+            logger.info("  - %s", profile_name)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -142,8 +153,10 @@ def main():
     parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress non-error output"
     )
-    parser.add_argument("command", choices=["sync"])
-    parser.add_argument("prefix")
+    parser.add_argument("command", choices=["sync", "list"])
+    parser.add_argument(
+        "prefix", help="Prefix for generated profile names (e.g. 'org')"
+    )
     parser.add_argument(
         "--dry-run", action="store_true", help="Show changes without writing to config"
     )
@@ -163,6 +176,8 @@ def main():
 
     if args.command == "sync":
         populate_profiles(args.prefix, dry_run=args.dry_run)
+    elif args.command == "list":
+        list_profiles(args.prefix)
 
 
 if __name__ == "__main__":
