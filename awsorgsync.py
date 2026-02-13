@@ -2,6 +2,7 @@
 
 import argparse
 import configparser
+import logging
 import os
 import re
 import subprocess
@@ -11,6 +12,8 @@ import boto3
 AWS_CONFIG_PATH = os.path.expanduser("~/.aws/config")
 
 IGNORED_ACCOUNT_KEYWORDS = ["finops"]
+
+logger = logging.getLogger("awsorgsync")
 
 
 def normalize(name):
@@ -61,7 +64,7 @@ def populate_profiles(prefix, dry_run=False):
     base_profile = prefix
     root_profile = f"{prefix}-root"
 
-    print(f"Logging in using {base_profile}...")
+    logger.info("Logging in using %s...", base_profile)
     ensure_sso_login(base_profile)
 
     config = load_config()
@@ -69,8 +72,8 @@ def populate_profiles(prefix, dry_run=False):
     role_name = extract_role_name(config, root_profile)
     region = extract_region(config, root_profile)
 
-    print(f"Using role: {role_name}")
-    print(f"Using region: {region}")
+    logger.info("Using role: %s", role_name)
+    logger.info("Using region: %s", region)
 
     accounts = get_org_accounts(root_profile)
     skipped_accounts = []
@@ -97,12 +100,13 @@ def populate_profiles(prefix, dry_run=False):
         if config.has_section(new_profile):
             continue
 
-        print(
-            f"{'[DRY-RUN] ' if dry_run else ''}Would create profile: {final_profile_name}"
-        )
-        print(f"  source_profile = {base_profile}")
-        print(f"  role_arn = arn:aws:iam::{account_id}:role/{role_name}")
-        print(f"  region = {region}")
+        if dry_run:
+            logger.info("[DRY-RUN] Would create profile: %s", final_profile_name)
+        else:
+            logger.info("Creating profile: %s", final_profile_name)
+        logger.debug("  source_profile = %s", base_profile)
+        logger.debug("  role_arn = arn:aws:iam::%s:role/%s", account_id, role_name)
+        logger.debug("  region = %s", region)
 
         if not dry_run:
             config.add_section(new_profile)
@@ -115,26 +119,47 @@ def populate_profiles(prefix, dry_run=False):
             config.set(new_profile, "region", region)
 
     if skipped_accounts:
-        print("\nSkipped accounts:")
+        logger.info("Skipped accounts:")
         for acc in skipped_accounts:
-            print(f"  - {acc}")
+            logger.info("  - %s", acc)
 
     if not dry_run:
         with open(AWS_CONFIG_PATH, "w") as f:
             config.write(f)
-        print("Done.")
+        logger.info("Done.")
     else:
-        print("Dry run complete. No changes written.")
+        logger.info("Dry run complete. No changes written.")
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose output (DEBUG level)",
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress non-error output"
+    )
     parser.add_argument("command", choices=["sync"])
     parser.add_argument("prefix")
     parser.add_argument(
         "--dry-run", action="store_true", help="Show changes without writing to config"
     )
     args = parser.parse_args()
+
+    if args.verbose and args.quiet:
+        parser.error("Cannot use --verbose and --quiet together")
+
+    if args.verbose:
+        log_level = logging.DEBUG
+    elif args.quiet:
+        log_level = logging.ERROR
+    else:
+        log_level = logging.INFO
+
+    logging.basicConfig(level=log_level, format="%(message)s")
 
     if args.command == "sync":
         populate_profiles(args.prefix, dry_run=args.dry_run)
