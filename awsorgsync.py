@@ -60,7 +60,10 @@ def get_org_accounts(profile: str):
     return accounts
 
 
-def populate_profiles(prefix: str, dry_run: bool = False):
+def populate_profiles(
+    prefix: str,
+    dry_run: bool = False,
+) -> list[str]:
     base_profile = prefix
     root_profile = f"{prefix}-root"
 
@@ -130,6 +133,56 @@ def populate_profiles(prefix: str, dry_run: bool = False):
     else:
         logger.info("Dry run complete. No changes written.")
 
+    return [account["Name"] for account in accounts]
+
+
+def prune_stale_profiles(
+    prefix: str, active_account_names: list[str], dry_run: bool = False
+):
+    config = load_config()
+    pattern = re.compile(f"^profile {prefix}[-a-z0-9]*$")
+
+    base_profile_section = f"profile {prefix}"
+    root_profile_section = f"profile {prefix}-root"
+
+    # Build expected profile names
+    expected_profiles = set()
+    for name in active_account_names:
+        normalized = normalize(name)
+        if normalized.startswith(f"{prefix}-"):
+            final_name = normalized
+        else:
+            final_name = f"{prefix}-{normalized}"
+        expected_profiles.add(f"profile {final_name}")
+
+    profiles_to_delete = []
+    for section in config.sections():
+        if (
+            pattern.match(section)
+            and section not in (base_profile_section, root_profile_section)
+            and section not in expected_profiles
+        ):
+            profiles_to_delete.append(section)
+
+    if not profiles_to_delete:
+        logger.info("No stale profiles found for prefix '%s'", prefix)
+        return
+
+    for profile in profiles_to_delete:
+        profile_name = profile.replace("profile ", "")
+        if dry_run:
+            logger.info("[DRY-RUN] Would prune profile: %s", profile_name)
+        else:
+            logger.info("Pruning profile: %s", profile_name)
+            config.remove_section(profile)
+
+    if not dry_run:
+        with open(AWS_CONFIG_PATH, "w") as f:
+            config.write(f)
+        logger.info("Prune complete.")
+    else:
+        logger.info("Dry run complete. No changes written.")
+
 
 def list_profiles(prefix: str):
     config = load_config()
@@ -192,15 +245,41 @@ def main():
     parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress non-error output"
     )
-    parser.add_argument(
-        "command", choices=["sync", "list", "clean"], help="Command to execute"
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # --- sync command ---
+    sync_parser = subparsers.add_parser(
+        "sync", help="Sync profiles from AWS Organization"
     )
-    parser.add_argument(
+    sync_parser.add_argument(
         "prefix", help="Prefix for generated profile names (e.g. 'org')"
     )
-    parser.add_argument(
+    sync_parser.add_argument(
         "--dry-run", action="store_true", help="Show changes without writing to config"
     )
+    sync_parser.add_argument(
+        "-p",
+        "--prune",
+        action="store_true",
+        help="Remove profiles not present in AWS Org",
+    )
+
+    # --- list command ---
+    list_parser = subparsers.add_parser("list", help="List profiles with prefix")
+    list_parser.add_argument(
+        "prefix", help="Prefix for generated profile names (e.g. 'org')"
+    )
+
+    # --- clean command ---
+    clean_parser = subparsers.add_parser("clean", help="Delete profiles with prefix")
+    clean_parser.add_argument(
+        "prefix", help="Prefix for generated profile names (e.g. 'org')"
+    )
+    clean_parser.add_argument(
+        "--dry-run", action="store_true", help="Show changes without writing to config"
+    )
+
     args = parser.parse_args()
 
     if args.verbose and args.quiet:
@@ -216,7 +295,9 @@ def main():
     logging.basicConfig(level=log_level, format="%(message)s")
 
     if args.command == "sync":
-        populate_profiles(args.prefix, dry_run=args.dry_run)
+        active_accounts = populate_profiles(args.prefix, dry_run=args.dry_run)
+        if args.prune:
+            prune_stale_profiles(args.prefix, active_accounts, dry_run=args.dry_run)
     elif args.command == "list":
         list_profiles(args.prefix)
     elif args.command == "clean":
