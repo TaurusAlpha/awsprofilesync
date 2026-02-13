@@ -142,6 +142,45 @@ def list_profiles(prefix: str):
             logger.info("  - %s", profile_name)
 
 
+def clean_profiles(prefix: str, dry_run: bool = False):
+    config = load_config()
+    pattern = re.compile(f"^profile {prefix}[-a-z0-9]*$")
+
+    base_profile_section = f"profile {prefix}"
+    root_profile_section = f"profile {prefix}-root"
+
+    profiles_to_delete = [
+        s
+        for s in config.sections()
+        if pattern.match(s) and s not in (base_profile_section, root_profile_section)
+    ]
+
+    logger.debug(
+        "Protected profiles: %s, %s",
+        base_profile_section.replace("profile ", ""),
+        root_profile_section.replace("profile ", ""),
+    )
+
+    if not profiles_to_delete:
+        logger.info("No profiles found with prefix '%s'", prefix)
+        return
+
+    for profile in profiles_to_delete:
+        profile_name = profile.replace("profile ", "")
+        if dry_run:
+            logger.info("[DRY-RUN] Would clean profile: %s", profile_name)
+        else:
+            logger.info("Cleaning profile: %s", profile_name)
+            config.remove_section(profile)
+
+    if not dry_run:
+        with open(AWS_CONFIG_PATH, "w") as f:
+            config.write(f)
+        logger.info("Done.")
+    else:
+        logger.info("Dry run complete. No changes written.")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -153,7 +192,9 @@ def main():
     parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress non-error output"
     )
-    parser.add_argument("command", choices=["sync", "list"])
+    parser.add_argument(
+        "command", choices=["sync", "list", "clean"], help="Command to execute"
+    )
     parser.add_argument(
         "prefix", help="Prefix for generated profile names (e.g. 'org')"
     )
@@ -178,6 +219,8 @@ def main():
         populate_profiles(args.prefix, dry_run=args.dry_run)
     elif args.command == "list":
         list_profiles(args.prefix)
+    elif args.command == "clean":
+        clean_profiles(args.prefix, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
