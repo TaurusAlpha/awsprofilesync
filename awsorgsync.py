@@ -22,7 +22,11 @@ def normalize(name):
 
 
 def ensure_sso_login(profile: str):
-    subprocess.run(["aws", "sso", "login", "--profile", profile], check=True)
+    logger.info("Logging in using %s...", profile)
+    subprocess.run(
+        ["aws", "sso", "login", "--profile", profile],
+        check=True,
+    )
 
 
 def load_config():
@@ -64,13 +68,19 @@ def populate_profiles(
     prefix: str,
     dry_run: bool = False,
 ) -> list[str]:
-    base_profile = prefix
+    sso_profile = prefix
     root_profile = f"{prefix}-root"
 
-    logger.info("Logging in using %s...", base_profile)
-    ensure_sso_login(base_profile)
-
     config = load_config()
+    base_profile_section = f"profile {sso_profile}"
+    if config.has_section(base_profile_section):
+        ensure_sso_login(sso_profile)
+    else:
+        logger.debug(
+            "Base profile '%s' not found in config, falling back to 'default'",
+            sso_profile,
+        )
+        ensure_sso_login("default")
 
     role_name = extract_role_name(config, root_profile)
     region = extract_region(config, root_profile)
@@ -109,13 +119,13 @@ def populate_profiles(
             logger.info("[DRY-RUN] Would create profile: %s", final_profile_name)
         else:
             logger.info("Creating profile: %s", final_profile_name)
-        logger.debug("  source_profile = %s", base_profile)
+        logger.debug("  source_profile = %s", sso_profile)
         logger.debug("  role_arn = arn:aws:iam::%s:role/%s", account_id, role_name)
         logger.debug("  region = %s", region)
 
         if not dry_run:
             config.add_section(new_profile)
-            config.set(new_profile, "source_profile", base_profile)
+            config.set(new_profile, "source_profile", sso_profile)
             config.set(
                 new_profile,
                 "role_arn",
