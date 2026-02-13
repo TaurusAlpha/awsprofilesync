@@ -80,6 +80,7 @@ def populate_profiles(
 
     accounts = get_org_accounts(root_profile)
     skipped_accounts = []
+    active_account_ids = []
 
     for account in accounts:
         account_name_raw = account["Name"]
@@ -91,6 +92,7 @@ def populate_profiles(
 
         name = normalize(account_name_raw)
         account_id = account["Id"]
+        active_account_ids.append(account_id)
 
         # Avoid double prefix
         if name.startswith(f"{prefix}-"):
@@ -133,11 +135,11 @@ def populate_profiles(
     else:
         logger.info("Dry run complete. No changes written.")
 
-    return [account["Name"] for account in accounts]
+    return active_account_ids
 
 
 def prune_stale_profiles(
-    prefix: str, active_account_names: list[str], dry_run: bool = False
+    prefix: str, active_accounts: list[str], dry_run: bool = False
 ):
     config = load_config()
     pattern = re.compile(f"^profile {prefix}[-a-z0-9]*$")
@@ -145,23 +147,25 @@ def prune_stale_profiles(
     base_profile_section = f"profile {prefix}"
     root_profile_section = f"profile {prefix}-root"
 
-    # Build expected profile names
-    expected_profiles = set()
-    for name in active_account_names:
-        normalized = normalize(name)
-        if normalized.startswith(f"{prefix}-"):
-            final_name = normalized
-        else:
-            final_name = f"{prefix}-{normalized}"
-        expected_profiles.add(f"profile {final_name}")
+    # Build expected account IDs set
+    expected_account_ids = set(active_accounts)
 
     profiles_to_delete = []
     for section in config.sections():
-        if (
-            pattern.match(section)
-            and section not in (base_profile_section, root_profile_section)
-            and section not in expected_profiles
-        ):
+        if not pattern.match(section):
+            continue
+        if section in (base_profile_section, root_profile_section):
+            continue
+
+        # Extract account ID from role_arn
+        try:
+            role_arn = config.get(section, "role_arn")
+            account_id = role_arn.split(":")[4]
+        except Exception:
+            logger.debug("Skipping profile without valid role_arn: %s", section)
+            continue
+
+        if account_id not in expected_account_ids:
             profiles_to_delete.append(section)
 
     if not profiles_to_delete:
