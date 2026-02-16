@@ -92,17 +92,36 @@ def populate_profiles(
     skipped_accounts = []
     active_account_ids = []
 
+    # Collect existing account IDs from current config
+    existing_account_ids = set()
+    for section in config.sections():
+        try:
+            role_arn = config.get(section, "role_arn")
+            account_id = role_arn.split(":")[4]
+            existing_account_ids.add(account_id)
+        except Exception:
+            continue
+
     for account in accounts:
         account_name_raw = account["Name"]
-        account_name_lower = account_name_raw.lower()
 
-        if any(keyword in account_name_lower for keyword in IGNORED_ACCOUNT_KEYWORDS):
+        if any(
+            keyword in account_name_raw.lower() for keyword in IGNORED_ACCOUNT_KEYWORDS
+        ):
             skipped_accounts.append(account_name_raw)
             continue
 
         name = normalize(account_name_raw)
         account_id = account["Id"]
         active_account_ids.append(account_id)
+
+        if account_id in existing_account_ids:
+            logger.info(
+                "Skipping account %s (%s) - profile with same account ID already exists",
+                account_name_raw,
+                account_id,
+            )
+            continue
 
         # Avoid double prefix
         if name.startswith(f"{prefix}-"):
