@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 
 import boto3
 
@@ -423,21 +424,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def configure_logging(verbose: bool, quiet: bool) -> None:
+    """
+    Configure logging level and handler based on CLI flags.
+    verbose -> DEBUG
+    quiet   -> ERROR
+    default -> INFO
+    """
+    if verbose and quiet:
+        print("ERROR: Cannot use --verbose and --quiet together.", file=sys.stderr)
+        sys.exit(2)
+
+    # Determine level
+    if verbose:
+        level = logging.DEBUG
+    elif quiet:
+        level = logging.ERROR
+    else:
+        level = logging.INFO
+
+    logger.setLevel(level)
+
+    # Avoid duplicate handlers if configure_logging() is called multiple times
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter("%(levelname)s: %(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.verbose and args.quiet:
-        parser.error("Cannot use --verbose and --quiet together")
+    configure_logging(verbose=args.verbose, quiet=args.quiet)
 
-    if args.verbose:
-        log_level = logging.DEBUG
-    elif args.quiet:
-        log_level = logging.ERROR
-    else:
-        log_level = logging.INFO
-
-    logging.basicConfig(level=log_level, format="%(message)s")
+    logger.debug("Arguments parsed successfully.")
+    logger.debug(f"Command: {args.command}")
 
     try:
         return int(args.func(args))
@@ -447,4 +470,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
