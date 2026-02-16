@@ -16,58 +16,145 @@ IGNORED_ACCOUNT_KEYWORDS = ["finops"]
 logger = logging.getLogger("awsorgsync")
 
 
-def normalize(name):
-    name = name.lower()
-    return re.sub(r"[^a-z0-9-]", "-", name)
+def normalize(name: str) -> str:
+    """
+    Normalize AWS account name to a safe profile suffix.
+    - Lowercase
+    - Replace invalid characters with '-'
+    - Collapse consecutive dashes
+    - Remove leading/trailing dashes
+    """
+    result = re.sub(r"[^a-z0-9-]", "-", name.lower())
+    result = re.sub(r"-+", "-", result)
+    return result.strip("-")
 
 
 def ensure_sso_login(profile: str):
-    logger.info("Logging in using %s...", profile)
-    subprocess.run(
-        ["aws", "sso", "login", "--profile", profile],
-        check=True,
-    )
+    """
+    Ensure AWS SSO session is active for the given profile.
+    """
+    try:
+        logger.info("Logging in using %s...", profile)
+        subprocess.run(
+            ["aws", "sso", "login", "--profile", profile],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        logger.error("SSO login failed for profile %s: %s", profile, e)
+        raise
 
 
 def load_config():
+    """
+    Load AWS CLI configuration file.
+    """
     config = configparser.RawConfigParser()
     config.read(AWS_CONFIG_PATH)
     return config
 
 
+def write_config(config):
+    """
+    Persist AWS CLI configuration to disk.
+    """
+    with open(AWS_CONFIG_PATH, "w") as f:
+        config.write(f)
+
+
+def finalize_write(config, dry_run: bool, success_message: str):
+    """
+    Write configuration unless dry-run, and log appropriate message.
+    """
+    if not dry_run:
+        write_config(config)
+        logger.info(success_message)
+    else:
+        logger.info("Dry run complete. No changes written.")
+
+
+def get_prefix_pattern(prefix: str):
+    """
+    Compile regex pattern to match profile sections with given prefix.
+    """
+    return re.compile(f"^profile {prefix}[-a-z0-9]*$")
+
+
+def get_protected_sections(prefix: str):
+    """
+    Return tuple of protected profile section names for base and root profiles.
+    """
+    return (
+        f"profile {prefix}",
+        f"profile {prefix}-root",
+    )
+
+
 def extract_role_name(config, root_profile: str):
+    """
+    Extract role name from role_arn in root profile section.
+    Raises if role_arn is invalid or missing.
+    """
     section = f"profile {root_profile}"
     if not config.has_section(section):
         raise Exception(f"{root_profile} not found in AWS config")
 
     role_arn = config.get(section, "role_arn")
+    if not role_arn or ":iam::" not in role_arn:
+        raise ValueError(f"Invalid role_arn in {section}")
     return role_arn.split("/")[-1]
 
 
 def extract_region(config, root_profile: str):
+    """
+    Extract region from root profile section.
+    """
     section = f"profile {root_profile}"
     return config.get(section, "region")
 
 
+def extract_account_id_from_arn(role_arn: str) -> str | None:
+    """
+    Extract AWS account ID from role ARN.
+    Returns None if ARN format is invalid.
+    """
+    if not role_arn or ":iam::" not in role_arn:
+        return None
+
+    parts = role_arn.split(":")
+    if len(parts) < 5:
+        return None
+
+    return parts[4]
+
+
 def get_org_accounts(profile: str):
-    session = boto3.Session(profile_name=profile)
-    org = session.client("organizations")
+    """
+    Retrieve all ACTIVE AWS Organization accounts using given profile.
+    """
+    try:
+        session = boto3.Session(profile_name=profile)
+        org = session.client("organizations")
+        paginator = org.get_paginator("list_accounts")
 
-    paginator = org.get_paginator("list_accounts")
-    accounts = []
-
-    for page in paginator.paginate():
-        for acc in page["Accounts"]:
-            if acc["Status"] == "ACTIVE":
-                accounts.append(acc)
-
-    return accounts
+        accounts = []
+        for page in paginator.paginate():
+            for acc in page["Accounts"]:
+                if acc["Status"] == "ACTIVE":
+                    accounts.append(acc)
+        return accounts
+    except Exception as e:
+        logger.error("Failed to retrieve AWS Organization accounts: %s", e)
+        raise
 
 
 def populate_profiles(
     prefix: str,
     dry_run: bool = False,
 ) -> list[str]:
+    """
+    Create missing AWS CLI profiles for the given prefix.
+    Returns list of active account IDs.
+    """
     sso_profile = prefix
     root_profile = f"{prefix}-root"
 
@@ -92,13 +179,17 @@ def populate_profiles(
     skipped_accounts = []
     active_account_ids = []
 
-    # Collect existing account IDs from current config
+    # Collect existing account IDs from current config only within prefix scope
     existing_account_ids = set()
+    prefix_pattern = get_prefix_pattern(prefix)
     for section in config.sections():
+        if not prefix_pattern.match(section):
+            continue
         try:
             role_arn = config.get(section, "role_arn")
-            account_id = role_arn.split(":")[4]
-            existing_account_ids.add(account_id)
+            account_id = extract_account_id_from_arn(role_arn)
+            if account_id:
+                existing_account_ids.add(account_id)
         except Exception:
             continue
 
@@ -157,12 +248,7 @@ def populate_profiles(
         for acc in skipped_accounts:
             logger.info("  - %s", acc)
 
-    if not dry_run:
-        with open(AWS_CONFIG_PATH, "w") as f:
-            config.write(f)
-        logger.info("Done.")
-    else:
-        logger.info("Dry run complete. No changes written.")
+    finalize_write(config, dry_run, "Done.")
 
     return active_account_ids
 
@@ -170,11 +256,13 @@ def populate_profiles(
 def prune_stale_profiles(
     prefix: str, active_accounts: list[str], dry_run: bool = False
 ):
+    """
+    Remove profiles under prefix whose account IDs are no longer active.
+    """
     config = load_config()
-    pattern = re.compile(f"^profile {prefix}[-a-z0-9]*$")
+    pattern = get_prefix_pattern(prefix)
 
-    base_profile_section = f"profile {prefix}"
-    root_profile_section = f"profile {prefix}-root"
+    base_profile_section, root_profile_section = get_protected_sections(prefix)
 
     # Build expected account IDs set
     expected_account_ids = set(active_accounts)
@@ -189,7 +277,10 @@ def prune_stale_profiles(
         # Extract account ID from role_arn
         try:
             role_arn = config.get(section, "role_arn")
-            account_id = role_arn.split(":")[4]
+            account_id = extract_account_id_from_arn(role_arn)
+            if not account_id:
+                logger.debug("Invalid role_arn format in %s", section)
+                continue
         except Exception:
             logger.debug("Skipping profile without valid role_arn: %s", section)
             continue
@@ -209,17 +300,15 @@ def prune_stale_profiles(
             logger.info("Pruning profile: %s", profile_name)
             config.remove_section(profile)
 
-    if not dry_run:
-        with open(AWS_CONFIG_PATH, "w") as f:
-            config.write(f)
-        logger.info("Prune complete.")
-    else:
-        logger.info("Dry run complete. No changes written.")
+    finalize_write(config, dry_run, "Prune complete.")
 
 
 def list_profiles(prefix: str):
+    """
+    List all profiles matching prefix.
+    """
     config = load_config()
-    pattern = re.compile(f"^profile {prefix}[-a-z0-9]*$")
+    pattern = get_prefix_pattern(prefix)
 
     logger.info("Profiles with prefix '%s':", prefix)
     for section in config.sections():
@@ -229,11 +318,13 @@ def list_profiles(prefix: str):
 
 
 def clean_profiles(prefix: str, dry_run: bool = False):
+    """
+    Remove all derived profiles for prefix (excluding base/root).
+    """
     config = load_config()
-    pattern = re.compile(f"^profile {prefix}[-a-z0-9]*$")
+    pattern = get_prefix_pattern(prefix)
 
-    base_profile_section = f"profile {prefix}"
-    root_profile_section = f"profile {prefix}-root"
+    base_profile_section, root_profile_section = get_protected_sections(prefix)
 
     profiles_to_delete = [
         s
@@ -259,12 +350,7 @@ def clean_profiles(prefix: str, dry_run: bool = False):
             logger.info("Cleaning profile: %s", profile_name)
             config.remove_section(profile)
 
-    if not dry_run:
-        with open(AWS_CONFIG_PATH, "w") as f:
-            config.write(f)
-        logger.info("Done.")
-    else:
-        logger.info("Dry run complete. No changes written.")
+    finalize_write(config, dry_run, "Done.")
 
 
 def main():
