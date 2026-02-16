@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Requires Python 3.10+
 
 import argparse
 import configparser
@@ -13,7 +14,24 @@ AWS_CONFIG_PATH = os.path.expanduser("~/.aws/config")
 
 IGNORED_ACCOUNT_KEYWORDS = ["finops"]
 
-logger = logging.getLogger("awsorgsync")
+logger = logging.getLogger("awsprofilesync")
+
+
+def handle_sync(args) -> int:
+    active_accounts = populate_profiles(args.prefix, dry_run=args.dry_run)
+    if args.prune:
+        prune_stale_profiles(args.prefix, active_accounts, dry_run=args.dry_run)
+    return 0
+
+
+def handle_list(args) -> int:
+    list_profiles(args.prefix)
+    return 0
+
+
+def handle_clean(args) -> int:
+    clean_profiles(args.prefix, dry_run=args.dry_run)
+    return 0
 
 
 def normalize(name: str) -> str:
@@ -353,7 +371,7 @@ def clean_profiles(prefix: str, dry_run: bool = False):
     finalize_write(config, dry_run, "Done.")
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-v",
@@ -383,12 +401,14 @@ def main():
         action="store_true",
         help="Remove profiles not present in AWS Org",
     )
+    sync_parser.set_defaults(func=handle_sync)
 
     # --- list command ---
     list_parser = subparsers.add_parser("list", help="List profiles with prefix")
     list_parser.add_argument(
         "prefix", help="Prefix for generated profile names (e.g. 'org')"
     )
+    list_parser.set_defaults(func=handle_list)
 
     # --- clean command ---
     clean_parser = subparsers.add_parser("clean", help="Delete profiles with prefix")
@@ -398,8 +418,14 @@ def main():
     clean_parser.add_argument(
         "--dry-run", action="store_true", help="Show changes without writing to config"
     )
+    clean_parser.set_defaults(func=handle_clean)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     if args.verbose and args.quiet:
         parser.error("Cannot use --verbose and --quiet together")
@@ -413,15 +439,12 @@ def main():
 
     logging.basicConfig(level=log_level, format="%(message)s")
 
-    if args.command == "sync":
-        active_accounts = populate_profiles(args.prefix, dry_run=args.dry_run)
-        if args.prune:
-            prune_stale_profiles(args.prefix, active_accounts, dry_run=args.dry_run)
-    elif args.command == "list":
-        list_profiles(args.prefix)
-    elif args.command == "clean":
-        clean_profiles(args.prefix, dry_run=args.dry_run)
+    try:
+        return int(args.func(args))
+    except Exception as e:
+        logger.error("Failed: %s", e)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
