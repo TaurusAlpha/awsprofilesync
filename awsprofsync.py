@@ -334,6 +334,19 @@ def list_profiles(prefix: str):
         if pattern.match(section):
             profile_name = section.replace("profile ", "")
             logger.info("  - %s", profile_name)
+            logger.debug(
+                "   account_id = %s",
+                extract_account_id_from_arn(
+                    config.get(section, "role_arn", fallback="None")
+                ),
+            )
+            logger.debug(
+                "   role = %s",
+                config.get(section, "role_arn", fallback="None").split("/")[-1],
+            )
+            logger.debug(
+                "   region = %s", config.get(section, "region", fallback="N/A")
+            )
 
 
 def clean_profiles(prefix: str, dry_run: bool = False):
@@ -374,13 +387,14 @@ def clean_profiles(prefix: str, dry_run: bool = False):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         help="Enable verbose output (DEBUG level)",
     )
-    parser.add_argument(
+    parent_parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress non-error output"
     )
 
@@ -388,7 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- sync command ---
     sync_parser = subparsers.add_parser(
-        "sync", help="Sync profiles from AWS Organization"
+        "sync", help="Sync profiles from AWS Organization", parents=[parent_parser]
     )
     sync_parser.add_argument(
         "prefix", help="Prefix for generated profile names (e.g. 'org')"
@@ -405,14 +419,18 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.set_defaults(func=handle_sync)
 
     # --- list command ---
-    list_parser = subparsers.add_parser("list", help="List profiles with prefix")
+    list_parser = subparsers.add_parser(
+        "list", help="List profiles with prefix", parents=[parent_parser]
+    )
     list_parser.add_argument(
         "prefix", help="Prefix for generated profile names (e.g. 'org')"
     )
     list_parser.set_defaults(func=handle_list)
 
     # --- clean command ---
-    clean_parser = subparsers.add_parser("clean", help="Delete profiles with prefix")
+    clean_parser = subparsers.add_parser(
+        "clean", help="Delete profiles with prefix", parents=[parent_parser]
+    )
     clean_parser.add_argument(
         "prefix", help="Prefix for generated profile names (e.g. 'org')"
     )
