@@ -50,17 +50,26 @@ def normalize(name: str) -> str:
 
 def ensure_sso_login(profile: str):
     """
-    Ensure AWS SSO session is active for the given profile.
+    Check if the session is active; if not, perform AWS SSO login.
     """
     try:
-        logger.info("Logging in using %s...", profile)
+        # Check if we already have a valid session
         subprocess.run(
-            ["aws", "sso", "login", "--profile", profile],
+            ["aws", "sts", "get-caller-identity", "--profile", profile],
             check=True,
+            capture_output=True,
         )
-    except subprocess.CalledProcessError as e:
-        logger.error("SSO login failed for profile %s: %s", profile, e)
-        raise
+        logger.info("Existing session for profile '%s' is active.", profile)
+    except subprocess.CalledProcessError:
+        try:
+            logger.info("Session expired or missing. Logging in using %s...", profile)
+            subprocess.run(
+                ["aws", "sso", "login", "--profile", profile],
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            logger.error("SSO login failed for profile %s: %s", profile, e)
+            raise
 
 
 def load_config():
