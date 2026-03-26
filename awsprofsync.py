@@ -35,6 +35,179 @@ def handle_clean(args) -> int:
     return 0
 
 
+def _prompt_yes_no(prompt: str, default: bool = False) -> bool:
+    """Simple yes/no prompt helper."""
+    default_str = "Y/n" if default else "y/N"
+    resp = input(f"{prompt} ({default_str}): ").strip().lower()
+    if not resp:
+        return default
+    return resp[0] == "y"
+
+
+def init_profiles(prefix: str, dry_run: bool = False) -> None:
+    """
+    Interactively prompt for SSO/root details and create initial profiles:
+    - profile <prefix>       (SSO profile)
+    - profile <prefix>-root  (root role_arn + region)
+    """
+    print("Initializing profiles for prefix:", prefix)
+
+    # Load config early so we can pick up any defaults from a `dummy` section
+    config = load_config()
+
+    # Read defaults from [dummy] and [profile dummy] if present
+    defaults_section = "dummy"
+    defaults: dict[str, str] = {}
+    if config.has_section(defaults_section):
+        try:
+            for k, v in config.items(defaults_section):
+                defaults[k] = v
+        except Exception:
+            pass
+
+    profile_dummy = f"profile {defaults_section}"
+    if config.has_section(profile_dummy):
+        try:
+            role_arn_val = config.get(profile_dummy, "role_arn", fallback=None)
+            if role_arn_val:
+                acct = extract_account_id_from_arn(role_arn_val)
+                if acct:
+                    defaults.setdefault("sso_account_id", acct)
+                defaults.setdefault("role_arn", role_arn_val)
+                defaults.setdefault("role_name", role_arn_val.split("/")[-1])
+            defaults.setdefault(
+                "region", config.get(profile_dummy, "region", fallback="")
+            )
+        except Exception:
+            pass
+
+    def _ask(
+        key: str, prompt_text: str, fallback: str = "", required: bool = False
+    ) -> str:
+        """Prompt with optional default and required enforcement.
+
+        - If a default exists, pressing Enter accepts it.
+        - If required=True and no default, keep prompting until non-empty input.
+        """
+        d = defaults.get(key, fallback)
+        if d:
+            resp = input(f"{prompt_text} [{d}]: ").strip()
+            return resp if resp else d
+        else:
+            # No default available
+            while True:
+                resp = input(f"{prompt_text}: ").strip()
+                if resp:
+                    return resp
+                if not required:
+                    return ""
+
+    sso_start_url = _ask("sso_start_url", "SSO Start URL")
+    sso_region = _ask("sso_region", "SSO region", required=True)
+    sso_account_id = _ask("sso_account_id", "SSO account id", required=True)
+    customer_name = _ask("customer_name", "Customer/account name", required=True)
+    role_name = _ask(
+        "role_name",
+        "Role name to assume",
+        defaults.get("role_name", ""),
+        required=True,
+    )
+    region = _ask(
+        "region",
+        "Default region",
+        sso_region,
+    )
+    if not region:
+        region = sso_region
+
+    if not customer_name:
+        print("ERROR: customer/account name is required.")
+        return
+    if not sso_account_id or not role_name:
+        print("ERROR: sso_account_id and role_name are required.")
+        return
+
+    base_section = f"profile {prefix}"
+    root_section = f"profile {prefix}-root"
+
+    # Show what will be created
+    print("\nWill create the following profile sections:")
+    print(f" - {base_section} (SSO profile)")
+    print(f" - {root_section} (root role_arn + region)")
+
+    # Print a summary of values to be written
+    print("\nSummary:")
+    print(f"  SSO start URL: {sso_start_url}")
+    print(f"  SSO region:    {sso_region}")
+    print(f"  SSO account:   {sso_account_id}")
+    print(f"  Customer name: {customer_name}")
+    print(f"  Role name:     {role_name}")
+    print(
+        f"  Role ARN:      {defaults.get('role_arn') or f'arn:aws:iam::{sso_account_id}:role/{role_name}'}"
+    )
+    print(f"  Region:        {region}")
+
+    if not _prompt_yes_no("Proceed?", default=True):
+        print("Aborted.")
+        return
+
+    # Create/update base SSO profile
+    if config.has_section(base_section):
+        if not _prompt_yes_no(
+            f"Section {base_section} exists. Overwrite?", default=False
+        ):
+            print(f"Skipping {base_section}")
+        else:
+            config.remove_section(base_section)
+
+    if not dry_run:
+        if not config.has_section(base_section):
+            config.add_section(base_section)
+        if sso_start_url:
+            config.set(base_section, "sso_start_url", sso_start_url)
+        if sso_region:
+            config.set(base_section, "sso_region", sso_region)
+        # copy common defaults (sso_* and basic CLI settings) when present
+        for dk, dv in defaults.items():
+            if not dv:
+                continue
+            if dk.startswith("sso_") or dk in ("output", "retry_mode", "cli_pager"):
+                try:
+                    config.set(base_section, dk, dv)
+                except Exception:
+                    pass
+
+        # Ensure chosen account/role are set from prompts
+        config.set(base_section, "sso_account_id", sso_account_id)
+        config.set(base_section, "sso_role_name", role_name)
+
+    # Create root profile with role_arn and region
+    role_arn = (
+        defaults.get("role_arn") or f"arn:aws:iam::{sso_account_id}:role/{role_name}"
+    )
+    if config.has_section(root_section):
+        if not _prompt_yes_no(
+            f"Section {root_section} exists. Overwrite?", default=False
+        ):
+            print(f"Skipping {root_section}")
+        else:
+            config.remove_section(root_section)
+
+    if not dry_run:
+        if not config.has_section(root_section):
+            config.add_section(root_section)
+        config.set(root_section, "role_arn", role_arn)
+        if region:
+            config.set(root_section, "region", region)
+
+    finalize_write(config, dry_run, "Init complete.")
+
+
+def handle_init(args) -> int:
+    init_profiles(args.prefix, dry_run=args.dry_run)
+    return 0
+
+
 def normalize(name: str) -> str:
     """
     Normalize AWS account name to a safe profile suffix.
@@ -447,6 +620,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Show changes without writing to config"
     )
     clean_parser.set_defaults(func=handle_clean)
+
+    # --- init command ---
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Interactively create initial SSO and root profiles for a prefix",
+        parents=[parent_parser],
+    )
+    init_parser.add_argument(
+        "prefix", help="Prefix for generated profile names (e.g. 'org')"
+    )
+    init_parser.add_argument(
+        "--dry-run", action="store_true", help="Show changes without writing to config"
+    )
+    init_parser.set_defaults(func=handle_init)
 
     return parser
 
