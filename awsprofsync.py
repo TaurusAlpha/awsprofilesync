@@ -3,19 +3,52 @@
 
 import argparse
 import configparser
-import logging
 import os
 import re
 import subprocess
 import sys
 
-import boto3
-
 AWS_CONFIG_PATH = os.path.expanduser("~/.aws/config")
-
 IGNORED_ACCOUNT_KEYWORDS = ["finops"]
 
-logger = logging.getLogger("awsprofilesync")
+# CLI verbosity flag (controlled by -v)
+CLI_VERBOSE = False
+
+# ANSI Color Codes
+COLORS = {
+    "green": "\033[32m",
+    "bright_green": "\033[92m",
+    "yellow": "\033[33m",
+    "red": "\033[31m",
+    "cyan": "\033[36m",
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+}
+
+
+def cli_print(msg: str, *args, style: str | None = None, err: bool = False) -> None:
+    """Pretty prints to terminal using ANSI codes."""
+    text = msg % args if args else msg
+    color = COLORS.get(style or "", "")
+    reset = COLORS["reset"] if color else ""
+
+    output = f"{color}{text}{reset}"
+    if err:
+        print(output, file=sys.stderr)
+    else:
+        print(output)
+
+
+# Logic for AWS interaction (boto3 still required for Org access)
+try:
+    import boto3
+except ImportError:
+    cli_print(
+        "ERROR: 'boto3' library is required. Install via 'pip install boto3'",
+        style="red",
+        err=True,
+    )
+    sys.exit(1)
 
 
 def handle_sync(args) -> int:
@@ -36,7 +69,6 @@ def handle_clean(args) -> int:
 
 
 def _prompt_yes_no(prompt: str, default: bool = False) -> bool:
-    """Simple yes/no prompt helper."""
     default_str = "Y/n" if default else "y/N"
     resp = input(f"{prompt} ({default_str}): ").strip().lower()
     if not resp:
@@ -45,17 +77,9 @@ def _prompt_yes_no(prompt: str, default: bool = False) -> bool:
 
 
 def init_profiles(prefix: str, dry_run: bool = False) -> None:
-    """
-    Interactively prompt for SSO/root details and create initial profiles:
-    - profile <prefix>       (SSO profile)
-    - profile <prefix>-root  (root role_arn + region)
-    """
-    print("Initializing profiles for prefix:", prefix)
-
-    # Load config early so we can pick up any defaults from a `dummy` section
+    cli_print("Initializing profiles for prefix: %s", prefix, style="green")
     config = load_config()
 
-    # Read defaults from [dummy] and [profile dummy] if present
     defaults_section = "dummy"
     defaults: dict[str, str] = {}
     if config.has_section(defaults_section):
@@ -84,17 +108,11 @@ def init_profiles(prefix: str, dry_run: bool = False) -> None:
     def _ask(
         key: str, prompt_text: str, fallback: str = "", required: bool = False
     ) -> str:
-        """Prompt with optional default and required enforcement.
-
-        - If a default exists, pressing Enter accepts it.
-        - If required=True and no default, keep prompting until non-empty input.
-        """
         d = defaults.get(key, fallback)
         if d:
             resp = input(f"{prompt_text} [{d}]: ").strip()
             return resp if resp else d
         else:
-            # No default available
             while True:
                 resp = input(f"{prompt_text}: ").strip()
                 if resp:
@@ -107,56 +125,31 @@ def init_profiles(prefix: str, dry_run: bool = False) -> None:
     sso_account_id = _ask("sso_account_id", "SSO account id", required=True)
     customer_name = _ask("customer_name", "Customer/account name", required=True)
     role_name = _ask(
-        "role_name",
-        "Role name to assume",
-        defaults.get("role_name", ""),
-        required=True,
+        "role_name", "Role name to assume", defaults.get("role_name", ""), required=True
     )
-    region = _ask(
-        "region",
-        "Default region",
-        sso_region,
-    )
-    if not region:
-        region = sso_region
-
-    if not customer_name:
-        print("ERROR: customer/account name is required.")
-        return
-    if not sso_account_id or not role_name:
-        print("ERROR: sso_account_id and role_name are required.")
-        return
+    region = _ask("region", "Default region", sso_region) or sso_region
 
     base_section = f"profile {prefix}"
     root_section = f"profile {prefix}-root"
 
-    # Show what will be created
-    print("\nWill create the following profile sections:")
-    print(f" - {base_section} (SSO profile)")
-    print(f" - {root_section} (root role_arn + region)")
+    cli_print("\nPlanned profile sections:", style="bold")
+    cli_print(" - %s (SSO profile)", base_section, style="cyan")
+    cli_print(" - %s (root role_arn + region)", root_section, style="cyan")
 
-    # Print a summary of values to be written
-    print("\nSummary:")
-    print(f"  SSO start URL: {sso_start_url}")
-    print(f"  SSO region:    {sso_region}")
-    print(f"  SSO account:   {sso_account_id}")
-    print(f"  Customer name: {customer_name}")
-    print(f"  Role name:     {role_name}")
-    print(
-        f"  Role ARN:      {defaults.get('role_arn') or f'arn:aws:iam::{sso_account_id}:role/{role_name}'}"
-    )
-    print(f"  Region:        {region}")
+    cli_print("\nSummary of values:", style="bold")
+    cli_print("  SSO Account:   %s", sso_account_id, style="cyan")
+    cli_print("  Role Name:     %s", role_name, style="cyan")
+    cli_print("  Region:        %s", region, style="cyan")
 
-    if not _prompt_yes_no("Proceed?", default=True):
-        print("Aborted.")
+    if not _prompt_yes_no("\nProceed?", default=True):
+        cli_print("Aborted.", style="yellow")
         return
 
-    # Create/update base SSO profile
     if config.has_section(base_section):
         if not _prompt_yes_no(
             f"Section {base_section} exists. Overwrite?", default=False
         ):
-            print(f"Skipping {base_section}")
+            cli_print(f"Skipping {base_section}", style="yellow")
         else:
             config.remove_section(base_section)
 
@@ -167,21 +160,19 @@ def init_profiles(prefix: str, dry_run: bool = False) -> None:
             config.set(base_section, "sso_start_url", sso_start_url)
         if sso_region:
             config.set(base_section, "sso_region", sso_region)
-        # copy common defaults (sso_* and basic CLI settings) when present
+
         for dk, dv in defaults.items():
-            if not dv:
-                continue
-            if dk.startswith("sso_") or dk in ("output", "retry_mode", "cli_pager"):
+            if dv and (
+                dk.startswith("sso_") or dk in ("output", "retry_mode", "cli_pager")
+            ):
                 try:
                     config.set(base_section, dk, dv)
                 except Exception:
                     pass
 
-        # Ensure chosen account/role are set from prompts
         config.set(base_section, "sso_account_id", sso_account_id)
         config.set(base_section, "sso_role_name", role_name)
 
-    # Create root profile with role_arn and region
     role_arn = (
         defaults.get("role_arn") or f"arn:aws:iam::{sso_account_id}:role/{role_name}"
     )
@@ -189,7 +180,7 @@ def init_profiles(prefix: str, dry_run: bool = False) -> None:
         if not _prompt_yes_no(
             f"Section {root_section} exists. Overwrite?", default=False
         ):
-            print(f"Skipping {root_section}")
+            cli_print(f"Skipping {root_section}", style="yellow")
         else:
             config.remove_section(root_section)
 
@@ -209,96 +200,67 @@ def handle_init(args) -> int:
 
 
 def normalize(name: str) -> str:
-    """
-    Normalize AWS account name to a safe profile suffix.
-    - Lowercase
-    - Replace invalid characters with '-'
-    - Collapse consecutive dashes
-    - Remove leading/trailing dashes
-    """
     result = re.sub(r"[^a-z0-9-]", "-", name.lower())
     result = re.sub(r"-+", "-", result)
     return result.strip("-")
 
 
 def ensure_sso_login(profile: str):
-    """
-    Check if the session is active; if not, perform AWS SSO login.
-    """
     try:
-        # Check if we already have a valid session
         subprocess.run(
             ["aws", "sts", "get-caller-identity", "--profile", profile],
             check=True,
             capture_output=True,
         )
-        logger.info("Existing session for profile '%s' is active.", profile)
+        cli_print(
+            "Existing session for profile '%s' is active.", profile, style="green"
+        )
     except subprocess.CalledProcessError:
         try:
-            logger.info("Session expired or missing. Logging in using %s...", profile)
-            subprocess.run(
-                ["aws", "sso", "login", "--profile", profile],
-                check=True,
+            cli_print(
+                "Session expired or missing. Logging in using %s...",
+                profile,
+                style="yellow",
             )
+            subprocess.run(["aws", "sso", "login", "--profile", profile], check=True)
         except subprocess.CalledProcessError as e:
-            logger.error("SSO login failed for profile %s: %s", profile, e)
+            cli_print(
+                "SSO login failed for profile %s: %s", profile, e, style="red", err=True
+            )
             raise
 
 
 def load_config():
-    """
-    Load AWS CLI configuration file.
-    """
     config = configparser.RawConfigParser()
     config.read(AWS_CONFIG_PATH)
     return config
 
 
 def write_config(config):
-    """
-    Persist AWS CLI configuration to disk.
-    """
     with open(AWS_CONFIG_PATH, "w") as f:
         config.write(f)
 
 
 def finalize_write(config, dry_run: bool, success_message: str):
-    """
-    Write configuration unless dry-run, and log appropriate message.
-    """
     if not dry_run:
         write_config(config)
-        logger.info(success_message)
+        cli_print(success_message, style="green")
     else:
-        logger.info("Dry run complete. No changes written.")
+        cli_print("Dry run complete. No changes written.", style="yellow")
 
 
 def get_prefix_pattern(prefix: str):
-    """
-    Compile regex pattern to match profile sections with given prefix.
-    """
     return re.compile(f"^profile {prefix}[-a-z0-9]*$")
 
 
 def get_protected_sections(prefix: str):
-    """
-    Return tuple of protected profile section names for base and root profiles.
-    """
-    return (
-        f"profile {prefix}",
-        f"profile {prefix}-root",
-    )
+    return (f"profile {prefix}", f"profile {prefix}-root")
 
 
 def extract_role_name(config, root_profile: str):
-    """
-    Extract role name from role_arn in root profile section.
-    Raises if role_arn is invalid or missing.
-    """
     section = f"profile {root_profile}"
     if not config.has_section(section):
         raise Exception(f"{root_profile} not found in AWS config")
-
     role_arn = config.get(section, "role_arn")
     if not role_arn or ":iam::" not in role_arn:
         raise ValueError(f"Invalid role_arn in {section}")
@@ -306,37 +268,21 @@ def extract_role_name(config, root_profile: str):
 
 
 def extract_region(config, root_profile: str):
-    """
-    Extract region from root profile section.
-    """
-    section = f"profile {root_profile}"
-    return config.get(section, "region")
+    return config.get(f"profile {root_profile}", "region")
 
 
 def extract_account_id_from_arn(role_arn: str) -> str | None:
-    """
-    Extract AWS account ID from role ARN.
-    Returns None if ARN format is invalid.
-    """
     if not role_arn or ":iam::" not in role_arn:
         return None
-
     parts = role_arn.split(":")
-    if len(parts) < 5:
-        return None
-
-    return parts[4]
+    return parts[4] if len(parts) >= 5 else None
 
 
 def get_org_accounts(profile: str):
-    """
-    Retrieve all ACTIVE AWS Organization accounts using given profile.
-    """
     try:
         session = boto3.Session(profile_name=profile)
         org = session.client("organizations")
         paginator = org.get_paginator("list_accounts")
-
         accounts = []
         for page in paginator.paginate():
             for acc in page["Accounts"]:
@@ -344,342 +290,170 @@ def get_org_accounts(profile: str):
                     accounts.append(acc)
         return accounts
     except Exception as e:
-        logger.error("Failed to retrieve AWS Organization accounts: %s", e)
+        cli_print(
+            "Failed to retrieve AWS Organization accounts: %s", e, style="red", err=True
+        )
         raise
 
 
-def populate_profiles(
-    prefix: str,
-    dry_run: bool = False,
-) -> list[str]:
-    """
-    Create missing AWS CLI profiles for the given prefix.
-    Returns list of active account IDs.
-    """
-    sso_profile = prefix
-    root_profile = f"{prefix}-root"
-
+def populate_profiles(prefix: str, dry_run: bool = False) -> list[str]:
+    sso_profile, root_profile = prefix, f"{prefix}-root"
     config = load_config()
-    base_profile_section = f"profile {sso_profile}"
-    if config.has_section(base_profile_section):
+
+    if config.has_section(f"profile {sso_profile}"):
         ensure_sso_login(sso_profile)
     else:
-        logger.debug(
-            "Base profile '%s' not found in config, falling back to 'default'",
-            sso_profile,
-        )
         ensure_sso_login("default")
 
     role_name = extract_role_name(config, root_profile)
     region = extract_region(config, root_profile)
 
-    logger.info("Using role: %s", role_name)
-    logger.info("Using region: %s", region)
+    cli_print("Using role: %s", role_name, style="cyan")
+    cli_print("Using region: %s", region, style="cyan")
 
     accounts = get_org_accounts(root_profile)
-    skipped_accounts = []
     active_account_ids = []
 
-    # Collect existing account IDs from current config only within prefix scope
     existing_account_ids = set()
-    prefix_pattern = get_prefix_pattern(prefix)
+    pattern = get_prefix_pattern(prefix)
     for section in config.sections():
-        if not prefix_pattern.match(section):
-            continue
-        try:
-            role_arn = config.get(section, "role_arn")
-            account_id = extract_account_id_from_arn(role_arn)
-            if account_id:
-                existing_account_ids.add(account_id)
-        except Exception:
-            continue
+        if pattern.match(section):
+            try:
+                acc_id = extract_account_id_from_arn(config.get(section, "role_arn"))
+                if acc_id:
+                    existing_account_ids.add(acc_id)
+            except Exception:
+                pass
 
     for account in accounts:
-        account_name_raw = account["Name"]
-
-        if any(
-            keyword in account_name_raw.lower() for keyword in IGNORED_ACCOUNT_KEYWORDS
-        ):
-            skipped_accounts.append(account_name_raw)
+        if any(kw in account["Name"].lower() for kw in IGNORED_ACCOUNT_KEYWORDS):
             continue
 
-        name = normalize(account_name_raw)
-        account_id = account["Id"]
+        name, account_id = normalize(account["Name"]), account["Id"]
         active_account_ids.append(account_id)
 
         if account_id in existing_account_ids:
-            logger.info(
-                "Skipping account %s (%s) - profile with same account ID already exists",
-                account_name_raw,
-                account_id,
-            )
+            if CLI_VERBOSE:
+                cli_print(
+                    "Skipping %s (%s) - already exists",
+                    account["Name"],
+                    account_id,
+                    style="yellow",
+                )
             continue
 
-        # Avoid double prefix
-        if name.startswith(f"{prefix}-"):
-            final_profile_name = name
-        else:
-            final_profile_name = f"{prefix}-{name}"
+        final_name = name if name.startswith(f"{prefix}-") else f"{prefix}-{name}"
+        new_section = f"profile {final_name}"
 
-        new_profile = f"profile {final_profile_name}"
-
-        if config.has_section(new_profile):
+        if config.has_section(new_section):
             continue
 
         if dry_run:
-            logger.info("[DRY-RUN] Would create profile: %s", final_profile_name)
+            cli_print("[DRY-RUN] Create profile: %s", final_name, style="yellow")
         else:
-            logger.info("Creating profile: %s", final_profile_name)
-        logger.debug("  source_profile = %s", sso_profile)
-        logger.debug("  role_arn = arn:aws:iam::%s:role/%s", account_id, role_name)
-        logger.debug("  region = %s", region)
-
-        if not dry_run:
-            config.add_section(new_profile)
-            config.set(new_profile, "source_profile", sso_profile)
+            cli_print("Creating profile: %s", final_name, style="green")
+            config.add_section(new_section)
+            config.set(new_section, "source_profile", sso_profile)
             config.set(
-                new_profile,
-                "role_arn",
-                f"arn:aws:iam::{account_id}:role/{role_name}",
+                new_section, "role_arn", f"arn:aws:iam::{account_id}:role/{role_name}"
             )
-            config.set(new_profile, "region", region)
-
-    if skipped_accounts:
-        logger.info("Skipped accounts:")
-        for acc in skipped_accounts:
-            logger.info("  - %s", acc)
+            config.set(new_section, "region", region)
 
     finalize_write(config, dry_run, "Done.")
-
     return active_account_ids
 
 
 def prune_stale_profiles(
     prefix: str, active_accounts: list[str], dry_run: bool = False
 ):
-    """
-    Remove profiles under prefix whose account IDs are no longer active.
-    """
     config = load_config()
     pattern = get_prefix_pattern(prefix)
+    protected = get_protected_sections(prefix)
+    expected = set(active_accounts)
 
-    base_profile_section, root_profile_section = get_protected_sections(prefix)
-
-    # Build expected account IDs set
-    expected_account_ids = set(active_accounts)
-
-    profiles_to_delete = []
+    to_delete = []
     for section in config.sections():
-        if not pattern.match(section):
+        if not pattern.match(section) or section in protected:
             continue
-        if section in (base_profile_section, root_profile_section):
-            continue
-
-        # Extract account ID from role_arn
         try:
-            role_arn = config.get(section, "role_arn")
-            account_id = extract_account_id_from_arn(role_arn)
-            if not account_id:
-                logger.debug("Invalid role_arn format in %s", section)
-                continue
+            acc_id = extract_account_id_from_arn(config.get(section, "role_arn"))
+            if acc_id not in expected:
+                to_delete.append(section)
         except Exception:
-            logger.debug("Skipping profile without valid role_arn: %s", section)
             continue
 
-        if account_id not in expected_account_ids:
-            profiles_to_delete.append(section)
-
-    if not profiles_to_delete:
-        logger.info("No stale profiles found for prefix '%s'", prefix)
+    if not to_delete:
+        cli_print("No stale profiles found.", style="green")
         return
 
-    for profile in profiles_to_delete:
-        profile_name = profile.replace("profile ", "")
+    for section in to_delete:
+        name = section.replace("profile ", "")
         if dry_run:
-            logger.info("[DRY-RUN] Would prune profile: %s", profile_name)
+            cli_print("[DRY-RUN] Prune profile: %s", name, style="yellow")
         else:
-            logger.info("Pruning profile: %s", profile_name)
-            config.remove_section(profile)
+            cli_print("Pruning profile: %s", name, style="red")
+            config.remove_section(section)
 
     finalize_write(config, dry_run, "Prune complete.")
 
 
 def list_profiles(prefix: str):
-    """
-    List all profiles matching prefix.
-    """
     config = load_config()
     pattern = get_prefix_pattern(prefix)
-
-    logger.info("Profiles with prefix '%s':", prefix)
+    cli_print("Profiles for '%s':", prefix, style="bold")
     for section in config.sections():
         if pattern.match(section):
-            profile_name = section.replace("profile ", "")
-            logger.info("  - %s", profile_name)
-            logger.debug(
-                "   account_id = %s",
-                extract_account_id_from_arn(
-                    config.get(section, "role_arn", fallback="None")
-                ),
-            )
-            logger.debug(
-                "   role = %s",
-                config.get(section, "role_arn", fallback="None").split("/")[-1],
-            )
-            logger.debug(
-                "   region = %s", config.get(section, "region", fallback="N/A")
-            )
+            name = section.replace("profile ", "")
+            cli_print("  - %s", name, style="bright_green")
+            if CLI_VERBOSE:
+                role = config.get(section, "role_arn", fallback="N/A").split("/")[-1]
+                cli_print("    Role: %s", role, style="cyan")
 
 
 def clean_profiles(prefix: str, dry_run: bool = False):
-    """
-    Remove all derived profiles for prefix (excluding base/root).
-    """
     config = load_config()
     pattern = get_prefix_pattern(prefix)
-
-    base_profile_section, root_profile_section = get_protected_sections(prefix)
-
-    profiles_to_delete = [
-        s
-        for s in config.sections()
-        if pattern.match(s) and s not in (base_profile_section, root_profile_section)
+    protected = get_protected_sections(prefix)
+    to_delete = [
+        s for s in config.sections() if pattern.match(s) and s not in protected
     ]
 
-    logger.debug(
-        "Protected profiles: %s, %s",
-        base_profile_section.replace("profile ", ""),
-        root_profile_section.replace("profile ", ""),
-    )
-
-    if not profiles_to_delete:
-        logger.info("No profiles found with prefix '%s'", prefix)
-        return
-
-    for profile in profiles_to_delete:
-        profile_name = profile.replace("profile ", "")
+    for section in to_delete:
+        name = section.replace("profile ", "")
         if dry_run:
-            logger.info("[DRY-RUN] Would clean profile: %s", profile_name)
+            cli_print("[DRY-RUN] Delete profile: %s", name, style="yellow")
         else:
-            logger.info("Cleaning profile: %s", profile_name)
-            config.remove_section(profile)
-
-    finalize_write(config, dry_run, "Done.")
+            cli_print("Cleaning profile: %s", name, style="red")
+            config.remove_section(section)
+    finalize_write(config, dry_run, "Clean complete.")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parent_parser = argparse.ArgumentParser(add_help=False)
-    parent_parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose output (DEBUG level)",
-    )
-    parent_parser.add_argument(
-        "-q", "--quiet", action="store_true", help="Suppress non-error output"
-    )
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument("-v", "--verbose", action="store_true")
+    parent.add_argument("-q", "--quiet", action="store_true")
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # --- sync command ---
-    sync_parser = subparsers.add_parser(
-        "sync", help="Sync profiles from AWS Organization", parents=[parent_parser]
-    )
-    sync_parser.add_argument(
-        "prefix", help="Prefix for generated profile names (e.g. 'org')"
-    )
-    sync_parser.add_argument(
-        "--dry-run", action="store_true", help="Show changes without writing to config"
-    )
-    sync_parser.add_argument(
-        "-p",
-        "--prune",
-        action="store_true",
-        help="Remove profiles not present in AWS Org",
-    )
-    sync_parser.set_defaults(func=handle_sync)
-
-    # --- list command ---
-    list_parser = subparsers.add_parser(
-        "list", help="List profiles with prefix", parents=[parent_parser]
-    )
-    list_parser.add_argument(
-        "prefix", help="Prefix for generated profile names (e.g. 'org')"
-    )
-    list_parser.set_defaults(func=handle_list)
-
-    # --- clean command ---
-    clean_parser = subparsers.add_parser(
-        "clean", help="Delete profiles with prefix", parents=[parent_parser]
-    )
-    clean_parser.add_argument(
-        "prefix", help="Prefix for generated profile names (e.g. 'org')"
-    )
-    clean_parser.add_argument(
-        "--dry-run", action="store_true", help="Show changes without writing to config"
-    )
-    clean_parser.set_defaults(func=handle_clean)
-
-    # --- init command ---
-    init_parser = subparsers.add_parser(
-        "init",
-        help="Interactively create initial SSO and root profiles for a prefix",
-        parents=[parent_parser],
-    )
-    init_parser.add_argument(
-        "prefix", help="Prefix for generated profile names (e.g. 'org')"
-    )
-    init_parser.add_argument(
-        "--dry-run", action="store_true", help="Show changes without writing to config"
-    )
-    init_parser.set_defaults(func=handle_init)
-
+    for cmd in ["sync", "list", "clean", "init"]:
+        sp = sub.add_parser(cmd, parents=[parent])
+        sp.add_argument("prefix")
+        if cmd in ["sync", "clean", "init"]:
+            sp.add_argument("--dry-run", action="store_true")
+        if cmd == "sync":
+            sp.add_argument("-p", "--prune", action="store_true")
+        sp.set_defaults(func=globals()[f"handle_{cmd}"])
     return parser
 
 
-def configure_logging(verbose: bool, quiet: bool) -> None:
-    """
-    Configure logging level and handler based on CLI flags.
-    verbose -> DEBUG
-    quiet   -> ERROR
-    default -> INFO
-    """
-    if verbose and quiet:
-        print("ERROR: Cannot use --verbose and --quiet together.", file=sys.stderr)
-        sys.exit(2)
-
-    # Determine level
-    if verbose:
-        level = logging.DEBUG
-    elif quiet:
-        level = logging.ERROR
-    else:
-        level = logging.INFO
-
-    logger.setLevel(level)
-
-    # Avoid duplicate handlers if configure_logging() is called multiple times
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter("%(levelname)s: %(message)s")
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    configure_logging(verbose=args.verbose, quiet=args.quiet)
-
-    logger.debug("Arguments parsed successfully.")
-    logger.debug(f"Command: {args.command}")
-
+    args = build_parser().parse_args(argv)
+    global CLI_VERBOSE
+    CLI_VERBOSE = bool(args.verbose) and not bool(args.quiet)
     try:
         return int(args.func(args))
     except Exception as e:
-        logger.error("Failed: %s", e)
+        cli_print("Failed: %s", e, style="red", err=True)
         return 1
 
 
